@@ -1,0 +1,57 @@
+{
+  "name": "@logi-auth/browser",
+  "version": "0.1.0",
+  "description": "Browser SDK for logi (1pass) — OAuth 2.0 + OIDC PKCE for SPAs. Zero dependencies.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build && npm run test"
+  },
+  "keywords": [
+    "logi",
+    "1pass",
+    "oauth",
+    "oidc",
+    "pkce",
+    "spa",
+    "auth",
+    "openid"
+  ],
+  "author": "Seunghan Kim (https://github.com/seunghan91)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seunghan91/logi.git",
+    "directory": "Packages/npm/browser"
+  },
+  "homepage": "https://docs.1pass.dev",
+  "bugs": {
+    "url": "https://github.com/seunghan91/logi/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "sideEffects": false
+}
