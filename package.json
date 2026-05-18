@@ -1,6 +1,6 @@
 {
   "name": "@logi-auth/browser",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Browser SDK for logi (1pass) — OAuth 2.0 + OIDC PKCE for SPAs. Zero dependencies.",
   "type": "module",
   "main": "./dist/index.js",
@@ -36,12 +36,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/seunghan91/logi.git",
-    "directory": "Packages/npm/browser"
+    "url": "git+https://github.com/dcode-co/logi-auth-browser.git"
   },
   "homepage": "https://docs.1pass.dev",
   "bugs": {
-    "url": "https://github.com/seunghan91/logi/issues"
+    "url": "https://github.com/dcode-co/logi-auth-browser/issues"
   },
   "publishConfig": {
     "access": "public"
