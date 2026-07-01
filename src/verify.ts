@@ -40,7 +40,7 @@ export interface Jwks {
 }
 
 export interface VerifyExpected {
-  /** id_token.iss must equal this (logi issuer). */
+  /** id_token.iss must equal this (logi issuer, prod: https://api.1pass.dev). */
   issuer: string;
   /** id_token.aud must contain this (the RP's client_id). */
   clientId: string;

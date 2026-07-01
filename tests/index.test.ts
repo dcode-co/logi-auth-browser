@@ -155,7 +155,7 @@ describe("handleCallback", () => {
   it("exchanges code, verifies id_token, returns a LogiSession", async () => {
     const now = Math.floor(Date.now() / 1000);
     const idToken = signTestIdToken({
-      iss: "logi", aud: "logi_test", sub: "u_1",
+      iss: "https://api.1pass.dev", aud: "logi_test", sub: "u_1",
       exp: now + 3600, iat: now - 10, nonce: "n_test", jti: "j1", email: "a@b.c",
     });
     storage.set("logi-auth.pending", JSON.stringify({
@@ -200,7 +200,7 @@ describe("handleCallback", () => {
   it("rejects a tampered id_token with id_token_invalid", async () => {
     const now = Math.floor(Date.now() / 1000);
     const good = signTestIdToken({
-      iss: "logi", aud: "logi_test", sub: "u_1",
+      iss: "https://api.1pass.dev", aud: "logi_test", sub: "u_1",
       exp: now + 3600, iat: now - 10, nonce: "n_test", jti: "j1",
     });
     const parts = good.split(".");

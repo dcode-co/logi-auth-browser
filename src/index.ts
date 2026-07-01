@@ -35,7 +35,7 @@ export interface LogiAuthOptions {
   scopes?: string[];
   /** Issuer URL (authorize/token/JWKS base). Defaults to https://api.1pass.dev. */
   issuer?: string;
-  /** Expected `iss` claim inside the id_token (server OIDC_ISSUER). Defaults to "logi". */
+  /** Expected `iss` claim inside the id_token (server OIDC_ISSUER). Defaults to "https://api.1pass.dev". */
   tokenIssuer?: string;
   /** Override storage backend (default: sessionStorage). */
   storage?: StorageBackend;
@@ -115,7 +115,7 @@ export class LogiAuth {
     this.clientId = opts.clientId;
     this.redirectUri = opts.redirectUri;
     this.issuer = (opts.issuer ?? "https://api.1pass.dev").replace(/\/+$/, "");
-    this.tokenIssuer = opts.tokenIssuer ?? "logi";
+    this.tokenIssuer = opts.tokenIssuer ?? "https://api.1pass.dev";
     this.defaultScopes = opts.scopes ?? ["openid", "profile:basic", "email"];
     this.storage = opts.storage ?? sessionStorageBackend;
     this.pendingTtlMs = opts.pendingTtlMs ?? 10 * 60 * 1000;
