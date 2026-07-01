@@ -1,6 +1,6 @@
 {
   "name": "@logi-auth/browser",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Browser SDK for logi (1pass) — OAuth 2.0 + OIDC PKCE for SPAs. Zero dependencies.",
   "type": "module",
   "main": "./dist/index.js",
