@@ -32,8 +32,8 @@
     "auth",
     "openid"
   ],
-  "author": "Seunghan Kim (https://github.com/seunghan91)",
-  "license": "MIT",
+  "author": "Dcode (https://github.com/dcode-co)",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dcode-co/logi-auth-browser.git"
