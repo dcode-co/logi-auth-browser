@@ -16,7 +16,7 @@
 //   // NOT verify signatures (browsers can't keep the public-key cache safe
 //   // and the RP backend should be the trust root anyway).
 
-import { generateCodeVerifier, deriveCodeChallenge, generateState } from "./pkce.js";
+import { generateCodeVerifier, deriveCodeChallenge, generateState, generateNonce } from "./pkce.js";
 import {
   type StorageBackend,
   sessionStorageBackend,
@@ -24,6 +24,7 @@ import {
   loadPending,
   clearPending,
 } from "./storage.js";
+import { verifyIdToken, IdTokenError, type Jwks } from "./verify.js";
 
 export interface LogiAuthOptions {
   /** OAuth client_id from logi developer portal. Public PKCE client. */
@@ -32,8 +33,10 @@ export interface LogiAuthOptions {
   redirectUri: string;
   /** Default scopes; override per-call via signIn({ scopes }). */
   scopes?: string[];
-  /** Issuer URL. Defaults to https://api.1pass.dev. */
+  /** Issuer URL (authorize/token/JWKS base). Defaults to https://api.1pass.dev. */
   issuer?: string;
+  /** Expected `iss` claim inside the id_token (server OIDC_ISSUER). Defaults to "logi". */
+  tokenIssuer?: string;
   /** Override storage backend (default: sessionStorage). */
   storage?: StorageBackend;
   /** Maximum age of a pending handoff in ms (default: 10 minutes). */
@@ -58,7 +61,17 @@ export interface TokenResponse {
   scope?: string;
 }
 
-export interface CallbackResult extends TokenResponse {
+export interface LogiSession {
+  /** Verified subject from the id_token — pairwise per client. */
+  sub: string;
+  /** `email` claim, if present and the scope was granted. */
+  email?: string;
+  /** Raw id_token (already verified by this SDK). */
+  idToken: string;
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt?: number;
+  scope?: string;
   /** The `returnTo` value passed to signIn(), if any. */
   returnTo?: string;
 }
@@ -71,7 +84,10 @@ export type LogiAuthErrorCode =
   | "token_exchange_failed"
   | "expired_handoff"
   | "storage_unavailable"
-  | "network_error";
+  | "network_error"
+  | "missing_id_token"
+  | "id_token_invalid"
+  | "jwks_fetch_failed";
 
 export class LogiAuthError extends Error {
   constructor(
@@ -86,6 +102,7 @@ export class LogiAuthError extends Error {
 
 export class LogiAuth {
   readonly issuer: string;
+  readonly tokenIssuer: string;
   readonly clientId: string;
   readonly redirectUri: string;
   readonly defaultScopes: string[];
@@ -98,6 +115,7 @@ export class LogiAuth {
     this.clientId = opts.clientId;
     this.redirectUri = opts.redirectUri;
     this.issuer = (opts.issuer ?? "https://api.1pass.dev").replace(/\/+$/, "");
+    this.tokenIssuer = opts.tokenIssuer ?? "logi";
     this.defaultScopes = opts.scopes ?? ["openid", "profile:basic", "email"];
     this.storage = opts.storage ?? sessionStorageBackend;
     this.pendingTtlMs = opts.pendingTtlMs ?? 10 * 60 * 1000;
@@ -112,6 +130,7 @@ export class LogiAuth {
     const verifier = generateCodeVerifier();
     const challenge = await deriveCodeChallenge(verifier);
     const state = generateState();
+    const nonce = generateNonce();
     const scopes = (req.scopes ?? this.defaultScopes).join(" ");
 
     // Persist BEFORE navigating. If sessionStorage is disabled (Safari ITP,
@@ -123,6 +142,7 @@ export class LogiAuth {
         {
           state,
           verifier,
+          nonce,
           redirectUri: this.redirectUri,
           returnTo: req.returnTo,
           startedAt: Date.now(),
@@ -143,6 +163,7 @@ export class LogiAuth {
     url.searchParams.set("redirect_uri", this.redirectUri);
     url.searchParams.set("scope", scopes);
     url.searchParams.set("state", state);
+    url.searchParams.set("nonce", nonce);
     url.searchParams.set("code_challenge", challenge);
     url.searchParams.set("code_challenge_method", "S256");
     if (req.prompt) url.searchParams.set("prompt", req.prompt);
@@ -157,7 +178,7 @@ export class LogiAuth {
    *
    * Pass an explicit URL if you've already routed past the callback (rare).
    */
-  async handleCallback(callbackUrl?: string | URL): Promise<CallbackResult> {
+  async handleCallback(callbackUrl?: string | URL): Promise<LogiSession> {
     const url = new URL(
       callbackUrl ?? (typeof window !== "undefined" ? window.location.href : "http://localhost/")
     );
@@ -245,17 +266,67 @@ export class LogiAuth {
     }
 
     const tokens = await tokenResp.json();
+    const idToken = tokens.id_token;
+    if (typeof idToken !== "string" || !idToken) {
+      throw new LogiAuthError(
+        "missing_id_token",
+        "Token response had no id_token — was `openid` in the requested scopes?"
+      );
+    }
+
+    // Verify the id_token (public-client trust boundary). Confidential RPs with
+    // a backend should verify server-side instead of relying on this SDK.
+    const jwks = await this.fetchJwks();
+    let verified;
+    try {
+      verified = await verifyIdToken(idToken, {
+        jwks,
+        expected: {
+          issuer: this.tokenIssuer,
+          clientId: this.clientId,
+          nonce: pending.nonce,
+        },
+      });
+    } catch (cause) {
+      const code = cause instanceof IdTokenError ? cause.code : "unknown";
+      throw new LogiAuthError(
+        "id_token_invalid",
+        `id_token verification failed (${code}).`,
+        cause
+      );
+    }
+
+    const email = verified.claims["email"];
     return {
+      sub: verified.sub,
+      email: typeof email === "string" ? email : undefined,
+      idToken,
       accessToken: tokens.access_token,
-      idToken: tokens.id_token,
       refreshToken: tokens.refresh_token,
-      tokenType: tokens.token_type ?? "Bearer",
       expiresAt: tokens.expires_in
         ? Date.now() + Number(tokens.expires_in) * 1000
         : undefined,
       scope: tokens.scope,
       returnTo: pending.returnTo,
     };
+  }
+
+  /** Fetch the IdP's JWKS for id_token signature verification. */
+  private async fetchJwks(): Promise<Jwks> {
+    let resp: Response;
+    try {
+      resp = await fetch(`${this.issuer}/.well-known/jwks.json`);
+    } catch (cause) {
+      throw new LogiAuthError(
+        "network_error",
+        "Network error fetching JWKS for id_token verification.",
+        cause
+      );
+    }
+    if (!resp.ok) {
+      throw new LogiAuthError("jwks_fetch_failed", `JWKS fetch failed: HTTP ${resp.status}`);
+    }
+    return (await resp.json()) as Jwks;
   }
 
   /**

@@ -33,13 +33,15 @@ loginButton.addEventListener("click", () => {
 ```ts
 if (auth.hasPendingCallback()) {
   try {
-    const tokens = await auth.handleCallback();
-    // tokens.accessToken    — Bearer token for your API
-    // tokens.refreshToken   — store securely (preferably HttpOnly cookie via your backend)
-    // tokens.idToken        — OIDC identity (decode for UI hints only)
-    // tokens.returnTo       — what you passed to signIn({ returnTo })
-    // tokens.expiresAt      — ms epoch
-    location.replace(tokens.returnTo ?? "/");
+    const session = await auth.handleCallback();
+    // session.sub          — VERIFIED subject (RS256 sig + iss/aud/exp/nonce checked)
+    // session.email        — email claim, if granted
+    // session.accessToken  — Bearer token for your API
+    // session.refreshToken — store securely (see "Public vs confidential" below)
+    // session.idToken      — raw id_token (already verified)
+    // session.returnTo     — what you passed to signIn({ returnTo })
+    // session.expiresAt    — ms epoch
+    location.replace(session.returnTo ?? "/");
   } catch (err) {
     if (err instanceof LogiAuthError) {
       console.error(err.code, err.message, err.details);
@@ -77,7 +79,7 @@ This SDK does all of that in ~250 LOC, zero deps, ESM-only.
 
 - **Zero dependencies.** Uses `crypto.subtle` and `fetch` directly.
 - **Public client.** Never sends `client_secret`. Token endpoint must accept `none` auth (logi PKCE clients do).
-- **No signature verification.** ID token claims are decoded for UI only; your backend is the trust root and re-verifies via `/.well-known/jwks.json`.
+- **Verifies the id_token.** `handleCallback()` fetches `/.well-known/jwks.json` and verifies the id_token (RS256 signature + `iss`/`aud`/`exp`/`iat`/`nonce`) before returning a `LogiSession`, so `session.sub` is trustworthy client-side. See **Public vs confidential** for when that's the right boundary.
 - **sessionStorage by default.** Pending handoff is wiped on tab close. Override via `storage:` option.
 - **TTL on pending handoff.** Stale handoffs (default 10 min) are rejected with `expired_handoff`.
 
@@ -106,6 +108,17 @@ This SDK does all of that in ~250 LOC, zero deps, ESM-only.
 
 - **Multi-tab race.** Concurrent `signIn()` calls in multiple tabs share `sessionStorage` per origin, so only the most-recent handoff completes; the older tab's `handleCallback()` will fail with `state_mismatch`. State-keyed storage is on the v0.2.0 roadmap.
 - **No automatic refresh.** Call `auth.refresh(savedRefreshToken)` yourself before `expiresAt`. A token-manager wrapper (`@logi-auth/react`) is planned.
+
+## Public client vs confidential (who verifies the id_token?)
+
+This SDK is for **public clients** — SPAs / apps with **no backend** in the auth path. There the browser is the final relying party, so `handleCallback()` verifies the id_token itself and hands you a trustworthy `session.sub`.
+
+If your app **has a backend** (confidential client / BFF), the standard, safer split is:
+- the browser sends the authorization `code` to **your** backend,
+- your backend exchanges it and verifies the id_token server-side (a generic OIDC library on the discovery document below),
+- the browser never becomes the trust root.
+
+In that case you don't need this SDK's verification — use it only for the PKCE/redirect plumbing, or skip it and let the backend own the flow.
 
 ## Server side
 

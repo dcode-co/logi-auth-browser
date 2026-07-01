@@ -27,3 +27,11 @@ export function generateState(): string {
   crypto.getRandomValues(bytes);
   return base64url(bytes);
 }
+
+export function generateNonce(): string {
+  // OIDC nonce — echoed into the id_token by the IdP and verified on callback.
+  // Binds the id_token to this specific authorize request (replay defense).
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return base64url(bytes);
+}

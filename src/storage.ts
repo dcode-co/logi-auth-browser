@@ -10,6 +10,8 @@ export interface PendingHandoff {
   redirectUri: string;
   /** Optional caller-supplied passthrough (e.g. UI route to restore). */
   returnTo?: string;
+  /** OIDC nonce — echoed in the id_token, verified in handleCallback. */
+  nonce: string;
   /** ms epoch — used to expire stale handoffs. */
   startedAt: number;
 }
