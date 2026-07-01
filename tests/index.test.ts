@@ -5,6 +5,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LogiAuth, LogiAuthError } from "../src/index.js";
 import type { StorageBackend } from "../src/storage.js";
 import { generateCodeVerifier, deriveCodeChallenge, generateState } from "../src/pkce.js";
+import { generateKeyPairSync, createSign, createPublicKey } from "node:crypto";
+
+// --- RS256 id_token signing helper (real key, for handleCallback verification) ---
+const { privateKey: TEST_PRIV } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const TEST_PRIV_PEM = TEST_PRIV.export({ type: "pkcs8", format: "pem" }) as string;
+const TEST_KID = "test-kid-1";
+const TEST_PUB_JWK = createPublicKey(TEST_PRIV_PEM).export({ format: "jwk" });
+const TEST_JWKS = { keys: [{ ...TEST_PUB_JWK, kid: TEST_KID, alg: "RS256", use: "sig" }] };
+function signTestIdToken(payload: Record<string, unknown>): string {
+  const header = { alg: "RS256", kid: TEST_KID, typ: "JWT" };
+  const b64 = (x: string) => Buffer.from(x).toString("base64url");
+  const input = `${b64(JSON.stringify(header))}.${b64(JSON.stringify(payload))}`;
+  const sig = createSign("RSA-SHA256").update(input).sign(TEST_PRIV_PEM);
+  return `${input}.${sig.toString("base64url")}`;
+}
 
 class MemoryStorage implements StorageBackend {
   private map = new Map<string, string>();
@@ -137,35 +152,77 @@ describe("handleCallback", () => {
     ).rejects.toMatchObject({ code: "authorization_server_error" });
   });
 
-  it("exchanges code for tokens on a happy path and clears pending", async () => {
+  it("exchanges code, verifies id_token, returns a LogiSession", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const idToken = signTestIdToken({
+      iss: "logi", aud: "logi_test", sub: "u_1",
+      exp: now + 3600, iat: now - 10, nonce: "n_test", jti: "j1", email: "a@b.c",
+    });
     storage.set("logi-auth.pending", JSON.stringify({
-      state: "s", verifier: "v", redirectUri: "https://rp.example/cb", returnTo: "/dashboard",
-      startedAt: Date.now(),
+      state: "s", verifier: "v", nonce: "n_test",
+      redirectUri: "https://rp.example/cb", returnTo: "/dashboard", startedAt: Date.now(),
     }));
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({
-        access_token: "at_xxx", id_token: "header.eyJzdWIiOiJ1XzEifQ.sig",
-        refresh_token: "rt_xxx", token_type: "Bearer", expires_in: 3600, scope: "openid",
-      }), { status: 200, headers: { "Content-Type": "application/json" } })
-    );
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes("/oauth/token")) {
+        return Promise.resolve(new Response(JSON.stringify({
+          access_token: "at_xxx", id_token: idToken, refresh_token: "rt_xxx",
+          token_type: "Bearer", expires_in: 3600, scope: "openid",
+        }), { status: 200, headers: { "Content-Type": "application/json" } }));
+      }
+      if (u.includes("/.well-known/jwks.json")) {
+        return Promise.resolve(new Response(JSON.stringify(TEST_JWKS), { status: 200 }));
+      }
+      return Promise.reject(new Error("unexpected fetch: " + u));
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await auth.handleCallback("https://rp.example/cb?code=abc&state=s");
 
+    expect(result.sub).toBe("u_1"); // verified subject
+    expect(result.email).toBe("a@b.c");
     expect(result.accessToken).toBe("at_xxx");
     expect(result.refreshToken).toBe("rt_xxx");
     expect(result.returnTo).toBe("/dashboard");
     expect(result.expiresAt).toBeGreaterThan(Date.now());
     expect(storage.has("logi-auth.pending")).toBe(false);
 
-    const [url, init] = fetchMock.mock.calls[0]!;
-    expect(url).toBe("https://api.1pass.dev/oauth/token");
-    const body = (init as RequestInit).body as string;
+    const tokenCall = fetchMock.mock.calls.find((c) => String(c[0]).includes("/oauth/token"))!;
+    expect(tokenCall[0]).toBe("https://api.1pass.dev/oauth/token");
+    const body = (tokenCall[1] as RequestInit).body as string;
     expect(body).toContain("grant_type=authorization_code");
     expect(body).toContain("code=abc");
     expect(body).toContain("client_id=logi_test");
     expect(body).toContain("code_verifier=v");
     expect(body).not.toContain("client_secret"); // public client, never sends it
+  });
+
+  it("rejects a tampered id_token with id_token_invalid", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const good = signTestIdToken({
+      iss: "logi", aud: "logi_test", sub: "u_1",
+      exp: now + 3600, iat: now - 10, nonce: "n_test", jti: "j1",
+    });
+    const parts = good.split(".");
+    const sig = Buffer.from(parts[2]!, "base64url");
+    sig[0] ^= 0xff;
+    const tampered = `${parts[0]}.${parts[1]}.${sig.toString("base64url")}`;
+    storage.set("logi-auth.pending", JSON.stringify({
+      state: "s", verifier: "v", nonce: "n_test",
+      redirectUri: "https://rp.example/cb", startedAt: Date.now(),
+    }));
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes("/oauth/token")) {
+        return Promise.resolve(new Response(JSON.stringify({
+          access_token: "at", id_token: tampered, token_type: "Bearer", expires_in: 3600,
+        }), { status: 200, headers: { "Content-Type": "application/json" } }));
+      }
+      return Promise.resolve(new Response(JSON.stringify(TEST_JWKS), { status: 200 }));
+    }));
+    await expect(
+      auth.handleCallback("https://rp.example/cb?code=abc&state=s")
+    ).rejects.toMatchObject({ code: "id_token_invalid" });
   });
 
   it("token_exchange_failed surfaces HTTP body for diagnostics", async () => {
@@ -181,6 +238,33 @@ describe("handleCallback", () => {
       code: "token_exchange_failed",
       details: { status: 400, body: "invalid_grant" },
     });
+  });
+});
+
+describe("signIn", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("persists nonce and injects it (+ state, PKCE) into the authorize URL", async () => {
+    const storage = new MemoryStorage();
+    const assign = vi.fn();
+    vi.stubGlobal("window", { location: { assign } });
+    const auth = new LogiAuth({
+      clientId: "logi_test", redirectUri: "https://rp.example/cb", storage,
+    });
+
+    await auth.signIn();
+
+    const pending = JSON.parse(storage.get("logi-auth.pending")!);
+    expect(pending.nonce).toBeTruthy();
+
+    const url = new URL(assign.mock.calls[0]![0] as string);
+    expect(url.searchParams.get("nonce")).toBe(pending.nonce);
+    expect(url.searchParams.get("state")).toBe(pending.state);
+    expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(url.searchParams.get("client_id")).toBe("logi_test");
   });
 });
 
