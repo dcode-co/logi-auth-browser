@@ -106,6 +106,12 @@ export async function verifyIdToken(
     throw new IdTokenError("malformed", "id_token payload is not valid base64url JSON");
   }
 
+  // Only RS256 is accepted — never verify a token whose header declares another
+  // (or no) algorithm, even if the RSA signature happens to match.
+  if (header["alg"] !== "RS256") {
+    throw new IdTokenError("bad_signature", "unexpected alg; only RS256 is accepted");
+  }
+
   const kid = header["kid"];
   if (typeof kid !== "string" || !kid) {
     throw new IdTokenError("missing_kid", "id_token header is missing kid");
@@ -146,6 +152,19 @@ export async function verifyIdToken(
     : aud === opts.expected.clientId;
   if (!audOk) {
     throw new IdTokenError("aud_mismatch", `aud does not contain ${opts.expected.clientId}`);
+  }
+
+  // OIDC §3.1.3.7 azp: with multiple audiences an azp MUST be present; whenever
+  // azp is present it MUST equal our client_id.
+  const azp = payload["azp"];
+  if (Array.isArray(aud) && aud.length > 1) {
+    if (azp !== opts.expected.clientId) {
+      throw new IdTokenError("aud_mismatch", "azp must equal client_id for a multi-audience id_token");
+    }
+  } else if (azp !== undefined && azp !== null) {
+    if (azp !== opts.expected.clientId) {
+      throw new IdTokenError("aud_mismatch", "azp does not match client_id");
+    }
   }
 
   const exp = payload["exp"];
