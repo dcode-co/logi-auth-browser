@@ -266,6 +266,16 @@ export class LogiAuth {
     }
 
     const tokens = await tokenResp.json();
+    // Validate access_token is a real string BEFORE verification (parity with
+    // the Node server). Otherwise a malformed response carrying an at_hash-bound
+    // id_token but no usable access_token would skip the at_hash binding yet
+    // still return a session.
+    if (typeof tokens.access_token !== "string" || !tokens.access_token) {
+      throw new LogiAuthError(
+        "token_exchange_failed",
+        "Token response was missing access_token"
+      );
+    }
     const idToken = tokens.id_token;
     if (typeof idToken !== "string" || !idToken) {
       throw new LogiAuthError(
@@ -286,6 +296,10 @@ export class LogiAuth {
           clientId: this.clientId,
           nonce: pending.nonce,
         },
+        // Bind the access_token via at_hash so a swapped access_token is
+        // rejected before this session is returned. Skipped when the id_token
+        // carries no at_hash (non-breaking).
+        accessToken: tokens.access_token,
       });
     } catch (cause) {
       const code = cause instanceof IdTokenError ? cause.code : "unknown";

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LogiAuth, LogiAuthError } from "../src/index.js";
 import type { StorageBackend } from "../src/storage.js";
 import { generateCodeVerifier, deriveCodeChallenge, generateState } from "../src/pkce.js";
-import { generateKeyPairSync, createSign, createPublicKey } from "node:crypto";
+import { generateKeyPairSync, createSign, createPublicKey, createHash } from "node:crypto";
 
 // --- RS256 id_token signing helper (real key, for handleCallback verification) ---
 const { privateKey: TEST_PRIV } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -19,6 +19,14 @@ function signTestIdToken(payload: Record<string, unknown>): string {
   const input = `${b64(JSON.stringify(header))}.${b64(JSON.stringify(payload))}`;
   const sig = createSign("RSA-SHA256").update(input).sign(TEST_PRIV_PEM);
   return `${input}.${sig.toString("base64url")}`;
+}
+// Cross-SDK at_hash contract: base64url_nopad(SHA256(access_token)[0:16]).
+function atHashFor(accessToken: string): string {
+  return createHash("sha256")
+    .update(Buffer.from(accessToken, "utf8"))
+    .digest()
+    .subarray(0, 16)
+    .toString("base64url");
 }
 
 class MemoryStorage implements StorageBackend {
@@ -223,6 +231,57 @@ describe("handleCallback", () => {
     await expect(
       auth.handleCallback("https://rp.example/cb?code=abc&state=s")
     ).rejects.toMatchObject({ code: "id_token_invalid" });
+  });
+
+  it("rejects (before returning a session) when at_hash does not bind the access_token", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const idToken = signTestIdToken({
+      iss: "https://api.1pass.dev", aud: "logi_test", sub: "u_1",
+      exp: now + 3600, iat: now - 10, nonce: "n_test", jti: "j1",
+      at_hash: atHashFor("the-real-access-token"),
+    });
+    storage.set("logi-auth.pending", JSON.stringify({
+      state: "s", verifier: "v", nonce: "n_test",
+      redirectUri: "https://rp.example/cb", startedAt: Date.now(),
+    }));
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes("/oauth/token")) {
+        return Promise.resolve(new Response(JSON.stringify({
+          access_token: "a-SWAPPED-access-token", id_token: idToken, token_type: "Bearer", expires_in: 3600,
+        }), { status: 200, headers: { "Content-Type": "application/json" } }));
+      }
+      return Promise.resolve(new Response(JSON.stringify(TEST_JWKS), { status: 200 }));
+    }));
+    await expect(
+      auth.handleCallback("https://rp.example/cb?code=abc&state=s")
+    ).rejects.toMatchObject({ code: "id_token_invalid" });
+  });
+
+  it("returns a session when at_hash binds the access_token", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const accessToken = "matching-access-token";
+    const idToken = signTestIdToken({
+      iss: "https://api.1pass.dev", aud: "logi_test", sub: "u_1",
+      exp: now + 3600, iat: now - 10, nonce: "n_test", jti: "j1",
+      at_hash: atHashFor(accessToken),
+    });
+    storage.set("logi-auth.pending", JSON.stringify({
+      state: "s", verifier: "v", nonce: "n_test",
+      redirectUri: "https://rp.example/cb", startedAt: Date.now(),
+    }));
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes("/oauth/token")) {
+        return Promise.resolve(new Response(JSON.stringify({
+          access_token: accessToken, id_token: idToken, token_type: "Bearer", expires_in: 3600,
+        }), { status: 200, headers: { "Content-Type": "application/json" } }));
+      }
+      return Promise.resolve(new Response(JSON.stringify(TEST_JWKS), { status: 200 }));
+    }));
+    const result = await auth.handleCallback("https://rp.example/cb?code=abc&state=s");
+    expect(result.sub).toBe("u_1");
+    expect(result.accessToken).toBe(accessToken);
   });
 
   it("token_exchange_failed surfaces HTTP body for diagnostics", async () => {

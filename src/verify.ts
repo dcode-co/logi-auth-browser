@@ -1,6 +1,6 @@
 // RS256 id_token 검증 — WebCrypto(crypto.subtle), zero runtime deps.
 // 서버 검증 규칙 mirror: logi server/app/lib/oauth/jwt_verifier.rb
-//   kid 필수 → JWKS 조회 → RS256 서명검증 → iss · aud · exp · iat · nonce · sub.
+//   kid 필수 → JWKS(RS256 signing key) 조회 → RS256 서명검증 → iss · aud · exp · iat · nonce · sub · at_hash(present-only).
 // 4플랫폼 공통 골든 벡터(../../test-vectors/id-token-vectors.json)를 동일 통과해야 함.
 //
 // 주의: 이 SDK 는 public client(backend 없는 SPA)용 자체 검증 경로다. backend 있는
@@ -15,6 +15,7 @@ export type VerifyErrorCode =
   | "aud_mismatch"
   | "expired"
   | "nonce_mismatch"
+  | "at_hash_mismatch"
   | "missing_claim";
 
 export class IdTokenError extends Error {
@@ -55,6 +56,14 @@ export interface VerifyOptions {
   now?: number;
   /** Allowed clock skew in seconds (default 60). */
   clockSkewSec?: number;
+  /**
+   * The access_token from the same token response. When supplied AND the
+   * id_token carries an `at_hash` claim, the two are bound (OIDC §3.1.3.6) so
+   * an access_token substituted after the id_token was minted is rejected.
+   * Omitted (or an id_token with no at_hash) → the check is skipped, which
+   * keeps refresh-only / access-token-less verification callers working.
+   */
+  accessToken?: string;
 }
 
 export interface VerifiedIdToken {
@@ -71,6 +80,14 @@ function b64urlToBytes(seg: string): Uint8Array {
 function decodeSegment(seg: string): Record<string, unknown> {
   const json = new TextDecoder("utf-8").decode(b64urlToBytes(seg));
   return JSON.parse(json) as Record<string, unknown>;
+}
+
+// base64url without padding, matching the server's at_hash encoding. WebCrypto
+// (crypto.subtle / btoa) is used so this stays browser-safe and zero-dep.
+function bytesToB64urlNoPad(bytes: Uint8Array): string {
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 /**
@@ -116,7 +133,18 @@ export async function verifyIdToken(
   if (typeof kid !== "string" || !kid) {
     throw new IdTokenError("missing_kid", "id_token header is missing kid");
   }
-  const jwk = opts.jwks.keys.find((k) => k.kid === kid);
+  // Match the kid among *RS256 signing* keys only. Filtering on kty/use/alg
+  // keeps signature verification working if the JWKS later mixes in EC (or
+  // encryption) keys — an RSA key that shares the kid is still selected instead
+  // of a non-RSA one that WebCrypto's RSA importKey would choke on. A kid with
+  // no RSA/sig match still yields the existing unknown_kid error.
+  const jwk = opts.jwks.keys.find(
+    (k) =>
+      k.kid === kid &&
+      k.kty === "RSA" &&
+      (k.use == null || k.use === "sig") &&
+      (k.alg == null || k.alg === "RS256")
+  );
   if (!jwk) {
     throw new IdTokenError("unknown_kid", `no JWKS key matches kid=${kid}`);
   }
@@ -141,7 +169,7 @@ export async function verifyIdToken(
     throw new IdTokenError("bad_signature", "RS256 signature verification failed");
   }
 
-  // Claim checks (order: iss → aud → exp → iat → nonce → sub).
+  // Claim checks (order: iss → aud → exp → iat → nonce → sub → at_hash present-only).
   if (payload["iss"] !== opts.expected.issuer) {
     throw new IdTokenError("iss_mismatch", `iss ${String(payload["iss"])} != ${opts.expected.issuer}`);
   }
@@ -184,6 +212,28 @@ export async function verifyIdToken(
   const sub = payload["sub"];
   if (typeof sub !== "string" || !sub) {
     throw new IdTokenError("missing_claim", "id_token is missing sub");
+  }
+
+  // at_hash (OIDC §3.1.3.6), checked last — only after signature + every claim
+  // has passed. Present-only: bind the access_token to this id_token when both
+  // the claim and opts.accessToken are present, so an access_token swapped in
+  // after minting is rejected before the caller trusts the pair.
+  // Formula (single cross-SDK contract): base64url_nopad(SHA256(access_token)[0:16]).
+  const atHash = payload["at_hash"];
+  if (typeof atHash === "string" && typeof opts.accessToken === "string") {
+    const digest = new Uint8Array(
+      await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(opts.accessToken) as unknown as BufferSource
+      )
+    );
+    const computed = bytesToB64urlNoPad(digest.subarray(0, 16));
+    if (computed !== atHash) {
+      throw new IdTokenError(
+        "at_hash_mismatch",
+        "id_token at_hash does not match SHA-256(access_token)"
+      );
+    }
   }
 
   return { sub, claims: payload };
